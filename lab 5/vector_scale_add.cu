@@ -253,13 +253,14 @@ int main(int argc, char **argv)
 
   fprintf(fp, "N,trials,blocks,threads_per_block,cpu_us,adjacent_us,blocks_us,adjacent_speedup,blocks_speedup\n");
 
-  size_t sizes[] = {
-    1ULL << 30,
-    1ULL << 32,
-    1ULL << 34,
-    1ULL << 36,
-    1ULL << 38,
-    1ULL << 40
+size_t sizes[] = {
+    1ULL << 24,
+    1ULL << 25,
+    1ULL << 26,
+    1ULL << 27,
+    1ULL << 28,
+    1ULL << 29,
+    1Ull << 30
 };
 
   int count = sizeof(sizes) / sizeof(sizes[0]);
