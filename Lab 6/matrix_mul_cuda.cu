@@ -375,13 +375,37 @@ static RunResult runGpuVersion(const Matrix& a, const Matrix& b, Matrix& c, bool
 static RunResult runCpuVersion(const Matrix& a, const Matrix& b, Matrix& c)
 {
     RunResult result;
+    long long work = 1LL * a.rows * a.cols * b.cols;
+    int repeats = 1;
+
+    if (work < 5000000LL)
+    {
+        repeats = 200;
+    }
+    else if (work < 50000000LL)
+    {
+        repeats = 50;
+    }
+    else if (work < 200000000LL)
+    {
+        repeats = 10;
+    }
+    else
+    {
+        repeats = 3;
+    }
 
     auto start = chrono::high_resolution_clock::now();
-    multiplyCpuSingle(a, b, c);
+
+    for (int r = 0; r < repeats; r++)
+    {
+        multiplyCpuSingle(a, b, c);
+    }
+
     auto stop = chrono::high_resolution_clock::now();
 
     chrono::duration<double, milli> elapsed = stop - start;
-    result.ms = elapsed.count();
+    result.ms = elapsed.count() / repeats;
     result.gflops = totalOps(a, b) / (result.ms / 1000.0) / 1.0e9;
 
     return result;
