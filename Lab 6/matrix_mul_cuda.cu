@@ -15,7 +15,9 @@
 
 using namespace std;
 
-static const int TILE_SIZE = 16;
+static const int TILE_SIZE = 32;
+static const int GPU_BLOCK_X = 32;
+static const int GPU_BLOCK_Y = 8;
 
 struct Matrix
 {
@@ -157,7 +159,10 @@ static void multiplyCpuSingle(const Matrix& a, const Matrix& b, Matrix& c)
     }
 }
 
-__global__ void multiplyNaiveKernel(const float* a, const float* b, float* c, int m, int n, int p)
+__global__ void multiplyNaiveKernel(const float* __restrict__ a,
+                                    const float* __restrict__ b,
+                                    float* __restrict__ c,
+                                    int m, int n, int p)
 {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -175,10 +180,13 @@ __global__ void multiplyNaiveKernel(const float* a, const float* b, float* c, in
     }
 }
 
-__global__ void multiplyTiledKernel(const float* a, const float* b, float* c, int m, int n, int p)
+__global__ void multiplyTiledKernel(const float* __restrict__ a,
+                                    const float* __restrict__ b,
+                                    float* __restrict__ c,
+                                    int m, int n, int p)
 {
-    __shared__ float tileA[TILE_SIZE][TILE_SIZE];
-    __shared__ float tileB[TILE_SIZE][TILE_SIZE];
+    __shared__ float tileA[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float tileB[TILE_SIZE][TILE_SIZE + 1];
 
     int row = blockIdx.y * TILE_SIZE + threadIdx.y;
     int col = blockIdx.x * TILE_SIZE + threadIdx.x;
@@ -191,22 +199,25 @@ __global__ void multiplyTiledKernel(const float* a, const float* b, float* c, in
         int aCol = tile * TILE_SIZE + threadIdx.x;
         int bRow = tile * TILE_SIZE + threadIdx.y;
 
-        if (row < m && aCol < n)
+        if (threadIdx.y < TILE_SIZE && threadIdx.x < TILE_SIZE)
         {
-            tileA[threadIdx.y][threadIdx.x] = a[row * n + aCol];
-        }
-        else
-        {
-            tileA[threadIdx.y][threadIdx.x] = 0.0f;
-        }
+            if (row < m && aCol < n)
+            {
+                tileA[threadIdx.y][threadIdx.x] = a[row * n + aCol];
+            }
+            else
+            {
+                tileA[threadIdx.y][threadIdx.x] = 0.0f;
+            }
 
-        if (bRow < n && col < p)
-        {
-            tileB[threadIdx.y][threadIdx.x] = b[bRow * p + col];
-        }
-        else
-        {
-            tileB[threadIdx.y][threadIdx.x] = 0.0f;
+            if (bRow < n && col < p)
+            {
+                tileB[threadIdx.y][threadIdx.x] = b[bRow * p + col];
+            }
+            else
+            {
+                tileB[threadIdx.y][threadIdx.x] = 0.0f;
+            }
         }
 
         __syncthreads();
@@ -235,6 +246,26 @@ static bool cudaCheck(cudaError_t err, const string& message)
     }
 
     return true;
+}
+
+static int chooseGpuRepeats(const Matrix& a, const Matrix& b)
+{
+    long long work = 1LL * a.rows * a.cols * b.cols;
+
+    if (work < 5000000LL)
+    {
+        return 100;
+    }
+    else if (work < 50000000LL)
+    {
+        return 50;
+    }
+    else if (work < 200000000LL)
+    {
+        return 20;
+    }
+
+    return 10;
 }
 
 static DiffStats compareMatrices(const Matrix& x, const Matrix& y)
@@ -332,32 +363,110 @@ static RunResult runGpuVersion(const Matrix& a, const Matrix& b, Matrix& c, bool
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
 
-    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 block(GPU_BLOCK_X, GPU_BLOCK_Y);
     dim3 grid((b.cols + block.x - 1) / block.x, (a.rows + block.y - 1) / block.y);
 
-    cudaEventRecord(startEvent);
-
-    cudaMemcpy(dA, hPinnedA, bytesA, cudaMemcpyHostToDevice);
-    cudaMemcpy(dB, hPinnedB, bytesB, cudaMemcpyHostToDevice);
+    if (!cudaCheck(cudaMemcpy(dA, hPinnedA, bytesA, cudaMemcpyHostToDevice), "Warmup copy A") ||
+        !cudaCheck(cudaMemcpy(dB, hPinnedB, bytesB, cudaMemcpyHostToDevice), "Warmup copy B"))
+    {
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        cudaFree(dA);
+        cudaFree(dB);
+        cudaFree(dC);
+        cudaFreeHost(hPinnedA);
+        cudaFreeHost(hPinnedB);
+        cudaFreeHost(hPinnedC);
+        return result;
+    }
 
     if (tiled)
     {
-        multiplyTiledKernel << <grid, block >> > (dA, dB, dC, a.rows, a.cols, b.cols);
+        multiplyTiledKernel<<<grid, block>>>(dA, dB, dC, a.rows, a.cols, b.cols);
     }
     else
     {
-        multiplyNaiveKernel << <grid, block >> > (dA, dB, dC, a.rows, a.cols, b.cols);
+        multiplyNaiveKernel<<<grid, block>>>(dA, dB, dC, a.rows, a.cols, b.cols);
     }
 
-    cudaMemcpy(hPinnedC, dC, bytesC, cudaMemcpyDeviceToHost);
+    if (!cudaCheck(cudaGetLastError(), "Warmup kernel launch") ||
+        !cudaCheck(cudaDeviceSynchronize(), "Warmup synchronize"))
+    {
+        cudaEventDestroy(startEvent);
+        cudaEventDestroy(stopEvent);
+        cudaFree(dA);
+        cudaFree(dB);
+        cudaFree(dC);
+        cudaFreeHost(hPinnedA);
+        cudaFreeHost(hPinnedB);
+        cudaFreeHost(hPinnedC);
+        return result;
+    }
+
+    int repeats = chooseGpuRepeats(a, b);
+
+    cudaEventRecord(startEvent);
+
+    for (int r = 0; r < repeats; r++)
+    {
+        if (!cudaCheck(cudaMemcpy(dA, hPinnedA, bytesA, cudaMemcpyHostToDevice), "Timed copy A") ||
+            !cudaCheck(cudaMemcpy(dB, hPinnedB, bytesB, cudaMemcpyHostToDevice), "Timed copy B"))
+        {
+            cudaEventDestroy(startEvent);
+            cudaEventDestroy(stopEvent);
+            cudaFree(dA);
+            cudaFree(dB);
+            cudaFree(dC);
+            cudaFreeHost(hPinnedA);
+            cudaFreeHost(hPinnedB);
+            cudaFreeHost(hPinnedC);
+            return result;
+        }
+
+        if (tiled)
+        {
+            multiplyTiledKernel<<<grid, block>>>(dA, dB, dC, a.rows, a.cols, b.cols);
+        }
+        else
+        {
+            multiplyNaiveKernel<<<grid, block>>>(dA, dB, dC, a.rows, a.cols, b.cols);
+        }
+
+        if (!cudaCheck(cudaGetLastError(), "Kernel launch"))
+        {
+            cudaEventDestroy(startEvent);
+            cudaEventDestroy(stopEvent);
+            cudaFree(dA);
+            cudaFree(dB);
+            cudaFree(dC);
+            cudaFreeHost(hPinnedA);
+            cudaFreeHost(hPinnedB);
+            cudaFreeHost(hPinnedC);
+            return result;
+        }
+
+        if (!cudaCheck(cudaMemcpy(hPinnedC, dC, bytesC, cudaMemcpyDeviceToHost), "Timed copy C"))
+        {
+            cudaEventDestroy(startEvent);
+            cudaEventDestroy(stopEvent);
+            cudaFree(dA);
+            cudaFree(dB);
+            cudaFree(dC);
+            cudaFreeHost(hPinnedA);
+            cudaFreeHost(hPinnedB);
+            cudaFreeHost(hPinnedC);
+            return result;
+        }
+    }
+
     cudaEventRecord(stopEvent);
     cudaEventSynchronize(stopEvent);
 
     float elapsedMs = 0.0f;
     cudaEventElapsedTime(&elapsedMs, startEvent, stopEvent);
 
-    result.ms = elapsedMs;
-    result.gflops = totalOps(a, b) / (elapsedMs / 1000.0) / 1.0e9;
+    result.ms = elapsedMs / repeats;
+    result.gflops = totalOps(a, b) / (result.ms / 1000.0) / 1.0e9;
     c.values.assign(hPinnedC, hPinnedC + static_cast<size_t>(c.rows) * c.cols);
 
     cudaEventDestroy(startEvent);
@@ -452,24 +561,24 @@ static void printSummary(const Matrix& a, const Matrix& b, const RunResult& cpuR
     cout << "Output size (m * p): " << outputSize(a, b) << "\n\n";
 
     cout << left << setw(18) << "Version"
-        << setw(14) << "Time (ms)"
-        << setw(14) << "GFLOP/s"
-        << "Notes\n";
+         << setw(14) << "Time (ms)"
+         << setw(14) << "GFLOP/s"
+         << "Notes\n";
 
     cout << left << setw(18) << "CPU single"
-        << setw(14) << cpuResult.ms
-        << setw(14) << cpuResult.gflops
-        << "baseline\n";
+         << setw(14) << cpuResult.ms
+         << setw(14) << cpuResult.gflops
+         << "baseline\n";
 
     cout << left << setw(18) << "CUDA naive"
-        << setw(14) << naiveResult.ms
-        << setw(14) << naiveResult.gflops
-        << "includes H2D/D2H\n";
+         << setw(14) << naiveResult.ms
+         << setw(14) << naiveResult.gflops
+         << "avg + warmup + H2D/D2H\n";
 
     cout << left << setw(18) << "CUDA tiled"
-        << setw(14) << tiledResult.ms
-        << setw(14) << tiledResult.gflops
-        << "includes H2D/D2H\n";
+         << setw(14) << tiledResult.ms
+         << setw(14) << tiledResult.gflops
+         << "avg + warmup + H2D/D2H\n";
 
     cout << "\nConsistency vs CPU\n";
     cout << "Naive max abs diff : " << naiveDiff.maxAbsDiff << "\n";
