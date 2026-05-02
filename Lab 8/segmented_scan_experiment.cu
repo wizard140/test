@@ -1,41 +1,3 @@
-/*
-  Multi-Block Segmented Inclusive Scan Experiment
-
-  This is the large-input version of the segmented scan lab.
-
-  It includes:
-    1. CPU baseline segmented inclusive scan
-    2. CUDA Kogge-Stone segmented inclusive scan
-    3. CUDA Brent-Kung segmented inclusive scan
-
-  This version is NOT limited to MAX_N = 1024.
-  It uses many CUDA blocks and global-memory passes so it can test large arrays.
-
-  Compile:
-    nvcc -O3 segmented_scan_multiblock.cu -o segmented_scan_multiblock
-
-  Run default test:
-    ./segmented_scan_multiblock
-
-  Run custom test:
-    ./segmented_scan_multiblock repeats minPower maxPower verifyLimit
-
-  Example:
-    ./segmented_scan_multiblock 5 20 26 4194304
-
-  That means:
-    repeats = 5
-    test sizes 2^20 through 2^26
-    verify with CPU up to 4,194,304 elements
-
-  For about 1 GiB of input data:
-    ./segmented_scan_multiblock 3 27 27 4194304
-
-  Memory note:
-    Each element has one float value and one int flag, so the input alone is
-    about 8 bytes per element. The full program needs more memory because it
-    also stores outputs and temporary GPU buffers.
-*/
 
 #include <cuda_runtime.h>
 
@@ -293,7 +255,6 @@ __global__ void koggeStoneStepKernel(const float *in_values,
   phase 0 is upsweep.
   phase 1 is downsweep.
 
-  This version assumes n is a power of two. The program only tests powers of two.
 */
 __global__ void brentKungStepKernel(const float *in_values,
                                     const int *in_flags,
